@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { fireNumber, savingsRate, yearsToFire, coastFireNumber, baristaFireNumber, sustainableSpend } from "./fire.js";
+import { fireNumber, savingsRate, yearsToFire, coastFireNumber, baristaFireNumber, sustainableSpend } from "./fire";
 
 describe("fireNumber", () => {
   test("4% SWR → 25x expenses", () => {

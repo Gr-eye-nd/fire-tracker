@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { drawdownSchedule, sustainableWithdrawal, portfolioLongevity } from "./drawdown.js";
+import { drawdownSchedule, sustainableWithdrawal, portfolioLongevity } from "./drawdown";
 
 describe("drawdownSchedule", () => {
   const base = {

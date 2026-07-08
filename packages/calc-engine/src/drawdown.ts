@@ -1,4 +1,4 @@
-import type { DrawdownSnapshot } from "./types.js";
+import type { DrawdownSnapshot } from "./types";
 
 export interface DrawdownParams {
   portfolioBalance: number;

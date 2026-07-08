@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { superProjection, CONCESSIONAL_CAP, NON_CONCESSIONAL_CAP } from "./super.js";
+import { superProjection, CONCESSIONAL_CAP, NON_CONCESSIONAL_CAP } from "./super";
 
 describe("superProjection", () => {
   const base = {

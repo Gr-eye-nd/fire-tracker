@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { futureValue, compoundGrowthSchedule, requiredAnnualContribution, realRate } from "./compound.js";
+import { futureValue, compoundGrowthSchedule, requiredAnnualContribution, realRate } from "./compound";
 
 describe("futureValue", () => {
   test("no contributions", () => {

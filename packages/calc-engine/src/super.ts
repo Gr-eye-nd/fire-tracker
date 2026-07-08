@@ -1,4 +1,4 @@
-import type { SuperSnapshot } from "./types.js";
+import type { SuperSnapshot } from "./types";
 
 export const CONCESSIONAL_CAP = 30_000;
 export const NON_CONCESSIONAL_CAP = 120_000;

@@ -1,5 +1,5 @@
-import type { AssetBreakdown, FireSnapshot } from "./types.js";
-import { futureValue } from "./compound.js";
+import type { AssetBreakdown, FireSnapshot } from "./types";
+import { futureValue } from "./compound";
 
 export const DEFAULT_SWR = 0.04;
 

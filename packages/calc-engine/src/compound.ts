@@ -1,4 +1,4 @@
-import type { YearlySnapshot } from "./types.js";
+import type { YearlySnapshot } from "./types";
 
 export interface CompoundGrowthParams {
   principal: number;
