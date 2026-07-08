@@ -10,7 +10,7 @@ import {
   sustainableSpend,
   totalNetWorth,
   type FireSnapshot,
-} from "@fire-tracker/calc-engine";
+} from "@/lib/calc-engine";
 
 const fmt = (n: number) =>
   new Intl.NumberFormat("en-AU", {
