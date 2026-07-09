@@ -23,7 +23,7 @@ const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
 // ─── Chart constants ──────────────────────────────────────────────────────────
 
-const CHART_H = 130;
+const CHART_H = 160;
 const BAR_W = 14;
 const BAR_GAP = 2;
 const STEP = BAR_W + BAR_GAP;
@@ -35,6 +35,8 @@ type IncomePoint = { age: number; workingIncome: number; investIncome: number; s
 type InvestPhase = "grow" | "drawdown-invest" | "drawdown-combined";
 type InvestPoint = { age: number; balance: number; principalPortion: number; phase: InvestPhase };
 type DrawdownPoint = { age: number; value: number; depleted: boolean; phase: 1 | 2 };
+type CandleRaw = { age: number; remaining: number; withdrawn: number; depleted: boolean; phase: 1 | 2 };
+type CandlePoint = CandleRaw & { investPortion: number; superPortion: number };
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
@@ -68,12 +70,15 @@ export default function Home() {
   const sgAmount = employerSG(salary);
   const netIncome = tax.netIncome;
   const annualSurplus = netIncome - annualExpenses;
+  const monthlyExpenses = Math.round(annualExpenses / 12);
+  const weeklyExpenses = Math.round(annualExpenses / 52);
+  const expenseToIncomeRatio = netIncome > 0 ? annualExpenses / netIncome : 1;
 
   const investNW = investBalance + cashBalance;
   const netWorth = superBalance + investNW;
   const target = calcFireNumber(annualExpenses, swrDecimal);
 
-  // ── FI/RE age (invest-only drives the marker — super is locked until access age) ──
+  // ── FI/RE age (invest-only — super excluded until access age) ─────────────────
 
   const investFireResult = yearsToFire({
     currentNetWorth: investNW,
@@ -145,12 +150,13 @@ export default function Home() {
 
   const investAtFire = investSchedule[investSchedule.length - 1]?.balance ?? investNW;
 
-  // ── Drawdown — two phases, extended to age 100 ────────────────────────────────
+  // ── Drawdown — two phases to age 100; also build candleRaw for candle chart ───
 
   let drawdownData: DrawdownPoint[] = [];
   let drawdownLasts: number | null = null;
   let phase1FinalBalance = investAtFire;
   let expensesAtSuperAccess = annualExpenses;
+  const candleRaw: CandleRaw[] = [];
 
   if (retireBeforeSuper && effectiveFireAge !== null) {
     const yearsBeforeSuper = superAccessAge - effectiveFireAge;
@@ -186,6 +192,11 @@ export default function Home() {
       ...phase1.schedule.map((s) => ({ age: s.age, value: s.balance, depleted: s.depleted, phase: 1 as const })),
       ...phase2.schedule.map((s) => ({ age: s.age, value: s.balance, depleted: s.depleted, phase: 2 as const })),
     ];
+
+    for (const s of phase1.schedule)
+      candleRaw.push({ age: s.age, remaining: s.balance, withdrawn: s.withdrawal, depleted: s.depleted, phase: 1 });
+    for (const s of phase2.schedule)
+      candleRaw.push({ age: s.age, remaining: s.balance, withdrawn: s.withdrawal, depleted: s.depleted, phase: 2 });
   } else {
     const combined = drawdownSchedule({
       portfolioBalance: superAtAccess + investAtFire,
@@ -199,6 +210,8 @@ export default function Home() {
     drawdownData = combined.schedule.map((s) => ({
       age: s.age, value: s.balance, depleted: s.depleted, phase: 2 as const,
     }));
+    for (const s of combined.schedule)
+      candleRaw.push({ age: s.age, remaining: s.balance, withdrawn: s.withdrawal, depleted: s.depleted, phase: 2 });
   }
 
   const drawdownTo80 = drawdownData.filter((d) => d.age <= 80);
@@ -223,9 +236,8 @@ export default function Home() {
       currentAge: effectiveFireAge,
       maxYears: yearsBeforeSuper,
     });
-    for (const s of phase1Draw.schedule) {
+    for (const s of phase1Draw.schedule)
       investJourney.push({ age: s.age, balance: s.balance, principalPortion: s.balance, phase: "drawdown-invest" });
-    }
   }
 
   const superAccessStartAge = retireBeforeSuper ? superAccessAge : projectionEndAge;
@@ -238,17 +250,19 @@ export default function Home() {
   let rollingInvestBal = investAtAccessAge;
   for (let y = 0; y < yearsPostSuper; y++) {
     const thisYearExpenses = expensesAtSuperAccess * Math.pow(1.025, y);
-    const investWithdrawal = thisYearExpenses * investFrac;
-    rollingInvestBal = Math.max(rollingInvestBal * (1 + investRate) - investWithdrawal, 0);
-    investJourney.push({
-      age: superAccessStartAge + y + 1,
-      balance: rollingInvestBal,
-      principalPortion: rollingInvestBal,
-      phase: "drawdown-combined",
-    });
+    rollingInvestBal = Math.max(rollingInvestBal * (1 + investRate) - thisYearExpenses * investFrac, 0);
+    investJourney.push({ age: superAccessStartAge + y + 1, balance: rollingInvestBal, principalPortion: rollingInvestBal, phase: "drawdown-combined" });
   }
 
-  // ── Super full schedule — phases 1+2 (accumulation) + phase 3 (drawdown to 100) ──
+  // ── Candle chart data (add invest/super portions) ─────────────────────────────
+
+  const candleData: CandlePoint[] = candleRaw.map((c) => ({
+    ...c,
+    investPortion: c.phase === 2 ? c.remaining * investFrac : c.remaining,
+    superPortion:  c.phase === 2 ? c.remaining * superFrac  : 0,
+  }));
+
+  // ── Super full schedule: phases 1+2 (accumulation) + phase 3 (drawdown) ───────
 
   const superFullSchedule: SuperPoint[] = superCombinedSchedule.map((s) => ({
     age: s.age,
@@ -256,16 +270,14 @@ export default function Home() {
     phase: (retireBeforeSuper && effectiveFireAge !== null && s.age > effectiveFireAge ? 2 : 1) as 1 | 2 | 3,
   }));
 
-  // Phase 3: proportional drawdown from superAccessAge to 100
   let superBal = superAtAccess;
   const superStartWithdrawal = expensesAtSuperAccess * superFrac;
   for (let y = 0; y < 100 - superAccessAge; y++) {
-    const withdrawal = superStartWithdrawal * Math.pow(1.025, y);
-    superBal = Math.max(superBal * (1 + superRate) - withdrawal, 0);
+    superBal = Math.max(superBal * (1 + superRate) - superStartWithdrawal * Math.pow(1.025, y), 0);
     superFullSchedule.push({ age: superAccessAge + y + 1, value: superBal, phase: 3 });
   }
 
-  // ── FI/RE progress — invest-only NW (super excluded; can't be accessed yet) ────
+  // ── FI/RE progress — invest-only NW ──────────────────────────────────────────
 
   const investNWSchedule = compoundGrowthSchedule({
     principal: investNW,
@@ -282,15 +294,12 @@ export default function Home() {
   const incExpFull: IncomePoint[] = Array.from({ length: 100 - age }, (_, i) => {
     const yr = age + i + 1;
     const inflExp = Math.round(annualExpenses * Math.pow(1.025, i));
-    if (yr <= fireAgeForIncome) {
+    if (yr <= fireAgeForIncome)
       return { age: yr, workingIncome: netIncome, investIncome: 0, superIncome: 0, expenses: inflExp };
-    }
-    if (retireBeforeSuper && yr < superAccessAge) {
+    if (retireBeforeSuper && yr < superAccessAge)
       return { age: yr, workingIncome: 0, investIncome: inflExp, superIncome: 0, expenses: inflExp };
-    }
     return {
-      age: yr,
-      workingIncome: 0,
+      age: yr, workingIncome: 0,
       investIncome: Math.round(inflExp * (1 - superFrac)),
       superIncome: Math.round(inflExp * superFrac),
       expenses: inflExp,
@@ -328,8 +337,7 @@ export default function Home() {
               label="Super access age"
               value={superAccessAge}
               onChange={(v) => setSuperAccessAge(Math.max(60, v))}
-              min={60}
-              max={75}
+              min={60} max={75}
               display={String(superAccessAge)}
               note="Preservation age — cannot be below 60"
             />
@@ -358,7 +366,20 @@ export default function Home() {
 
           <Section title="Expenses">
             <Slider label="Annual living expenses" value={annualExpenses} onChange={setAnnualExpenses} min={10_000} max={300_000} step={1_000} display={fmt(annualExpenses)} />
-            <InfoRow label="Annual surplus (after tax)" value={fmt(annualSurplus)} good={annualSurplus > 0} bad={annualSurplus < 0} />
+            <div className="mt-2 bg-gray-800 rounded-lg p-3 space-y-1 text-xs">
+              <div className="flex justify-between text-gray-400"><span>Per month</span><span className="text-white">{fmt(monthlyExpenses)}</span></div>
+              <div className="flex justify-between text-gray-400"><span>Per week</span><span className="text-white">{fmt(weeklyExpenses)}</span></div>
+              <div className="flex justify-between text-gray-400">
+                <span>% of net income</span>
+                <span className={expenseToIncomeRatio > 0.85 ? "text-amber-400" : expenseToIncomeRatio > 0.7 ? "text-yellow-400" : "text-white"}>
+                  {netIncome > 0 ? fmtPct(expenseToIncomeRatio) : "—"}
+                </span>
+              </div>
+              <div className="flex justify-between font-semibold border-t border-gray-700 pt-1">
+                <span className="text-gray-300">Annual surplus</span>
+                <span className={annualSurplus >= 0 ? "text-emerald-400" : "text-amber-400"}>{fmt(annualSurplus)}</span>
+              </div>
+            </div>
           </Section>
         </aside>
 
@@ -377,7 +398,7 @@ export default function Home() {
               note={effectiveFireAge !== null ? `In ${effectiveFireAge - age} years` : "Adjust inputs"}
             />
             <Metric label="Investments at FI/RE" value={fmtK(investAtFire)} note={effectiveFireAge ? `Age ${effectiveFireAge}` : "—"} />
-            <Metric label={`Super at ${superAccessAge}`} value={fmtK(superAtAccess)} note={retireBeforeSuper ? "Grows untouched until access age" : undefined} />
+            <Metric label={`Super at ${superAccessAge}`} value={fmtK(superAtAccess)} note={retireBeforeSuper ? "Grows untouched until access" : undefined} />
             <Metric label="Retirement portfolio" value={fmtK(retirementPortfolio)} note="Investments + super" />
             <Metric label="Portfolio lasts" value={drawdownLasts ? `${drawdownLasts} yrs` : "100+ yrs"} good={drawdownLasts === null} />
           </div>
@@ -391,10 +412,10 @@ export default function Home() {
             </div>
           )}
 
-          {/* FI/RE Progress — invest-only, super excluded */}
+          {/* FI/RE Progress */}
           <Chart
             title="FI/RE Progress — Investments Only"
-            description={`Investment portfolio (no super) growing toward ${fmtK(target)} target. Super is excluded — it can't be accessed until age ${superAccessAge}. Bars turn green once the target is crossed at age ${effectiveFireAge ?? "—"}.`}
+            description={`Investment portfolio (no super) toward ${fmtK(target)} target. Super excluded — locked until age ${superAccessAge}. Bars turn green once the target is crossed at age ${effectiveFireAge ?? "—"}.`}
           >
             <FireProgressChart
               data={investNWSchedule.map((s) => ({ age: s.age, value: s.balance }))}
@@ -406,17 +427,17 @@ export default function Home() {
           {/* Income & Expenses — line chart to 100 */}
           <Chart
             title="Income & Expenses — to Age 100"
-            description={`Employment income (emerald) until FI/RE at age ${effectiveFireAge ?? "—"}. Investment drawdown (sky) bridges the gap${retireBeforeSuper ? ` until super unlocks at ${superAccessAge}` : ""}. Super drawdown (teal) from age ${superAccessAge}. Red dashed = inflation-adjusted expenses (2.5%/yr).`}
+            description={`Employment income (emerald) until FI/RE at age ${effectiveFireAge ?? "—"}. Investment drawdown (sky) bridges the gap${retireBeforeSuper ? ` until super unlocks at ${superAccessAge}` : ""}. Super drawdown (teal) from age ${superAccessAge}. Red dashed = inflation-adjusted expenses. Hover for values.`}
           >
             <IncExpLineChart data={incExpFull} fireAge={effectiveFireAge} superAccessAge={superAccessAge} />
           </Chart>
 
-          {/* Superannuation — full to age 100 */}
+          {/* Superannuation — full to 100 */}
           <Chart
             title="Superannuation — to Age 100"
             description={
               retireBeforeSuper && effectiveFireAge !== null
-                ? `Emerald = contributing (age ${age}–${effectiveFireAge}). Teal = locked growth (${effectiveFireAge}–${superAccessAge}) → ${fmtK(superAtAccess)} at access. Orange = proportional drawdown from age ${superAccessAge}.`
+                ? `Emerald = contributing (age ${age}–${effectiveFireAge}). Teal = locked growth (${effectiveFireAge}–${superAccessAge}) → ${fmtK(superAtAccess)}. Orange = proportional drawdown from age ${superAccessAge}.`
                 : `Emerald = contribution phase (age ${age}–${superAccessAge}) → ${fmtK(superAtAccess)}. Orange = proportional drawdown from age ${superAccessAge}.`
             }
           >
@@ -431,19 +452,29 @@ export default function Home() {
             title="Investments Outside Super — to Age 80"
             description={
               retireBeforeSuper && effectiveFireAge !== null
-                ? `Sky = growth (contributions + returns to age ${effectiveFireAge}). Medium sky = investments-only drawdown while waiting for super (age ${effectiveFireAge}–${superAccessAge}). Violet = investments share of combined drawdown after super unlocks.`
-                : `Sky = growth to FI/RE at age ${effectiveFireAge ?? "—"}. Violet = your share of combined drawdown to age 80.`
+                ? `Sky = growth (age ${age}–${effectiveFireAge}). Medium sky = invest-only drawdown (${effectiveFireAge}–${superAccessAge}). Violet = investments share of combined drawdown after super unlocks.`
+                : `Sky = growth to FI/RE (age ${effectiveFireAge ?? "—"}). Violet = your share of combined drawdown to age 80.`
             }
           >
             <InvestmentJourneyChart data={investJourney} fireAge={effectiveFireAge} superAccessAge={superAccessAge} />
           </Chart>
+
+          {/* Candle chart — retirement portfolio */}
+          {candleData.length > 0 && (
+            <Chart
+              title="Retirement Portfolio — Annual Candle View"
+              description={`Each candle: body = portfolio balance remaining after withdrawals (sky = investments, orange = super). Wick above = annual withdrawal consumed. Shows the drawdown progression from FI/RE age ${effectiveFireAge ?? "—"} to 100.`}
+            >
+              <CandleChart data={candleData} superUnlockAge={retireBeforeSuper ? superAccessAge : (effectiveFireAge ?? projectionEndAge)} />
+            </Chart>
+          )}
 
           {/* Drawdown — to age 80 */}
           <Chart
             title="Retirement Drawdown — to Age 80"
             description={
               retireBeforeSuper && effectiveFireAge !== null
-                ? `Sky = investments only (age ${effectiveFireAge}–${superAccessAge}). Violet = super + investments from age ${superAccessAge}. ${drawdownLasts && drawdownLasts <= 80 ? `Depleted at year ${drawdownLasts}.` : "Healthy at 80."}`
+                ? `Sky = investments only (age ${effectiveFireAge}–${superAccessAge}). Violet = super + investments from ${superAccessAge}. ${drawdownLasts && drawdownLasts <= 80 ? `Depleted at year ${drawdownLasts}.` : "Healthy at 80."}`
                 : `Starting ${fmtK(retirementPortfolio)} at age ${projectionEndAge}, withdrawing ${fmt(annualExpenses)}/yr inflation-adjusted.`
             }
           >
@@ -537,7 +568,7 @@ function Chart({ title, description, children }: {
   );
 }
 
-// ─── Shared helpers ───────────────────────────────────────────────────────────
+// ─── Shared bar age labels ────────────────────────────────────────────────────
 
 function AgeLabels({ data, labelEvery }: { data: { age: number }[]; labelEvery: number }) {
   return (
@@ -551,7 +582,7 @@ function AgeLabels({ data, labelEvery }: { data: { age: number }[]; labelEvery: 
   );
 }
 
-// ─── Super chart — 3 phases (contributing / locked / drawdown) ────────────────
+// ─── Super chart — 3 phases ───────────────────────────────────────────────────
 
 function SuperChart({ data, phase2StartAge }: {
   data: SuperPoint[];
@@ -565,21 +596,16 @@ function SuperChart({ data, phase2StartAge }: {
     <div className="overflow-x-auto">
       <div className="flex flex-wrap gap-4 mb-2 text-xs text-gray-500">
         <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-emerald-600" /> Contributing</span>
-        {phase2StartAge !== null && (
-          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-teal-600" /> Locked — growth only</span>
-        )}
+        {phase2StartAge !== null && <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-teal-600" /> Locked — growth only</span>}
         <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-orange-500" /> Drawdown</span>
       </div>
       <div className="flex items-end min-w-max" style={{ height: CHART_H, gap: BAR_GAP }}>
         {data.map((d, i) => {
           const h = Math.max(Math.round((d.value / maxVal) * CHART_H), 2);
-          const cls =
-            d.phase === 3 ? "bg-orange-500 hover:bg-orange-400" :
-            d.phase === 2 ? "bg-teal-600 hover:bg-teal-400" :
-            "bg-emerald-600 hover:bg-emerald-400";
-          const phaseLabel = d.phase === 3 ? " (drawdown)" : d.phase === 2 ? " (locked)" : "";
+          const cls = d.phase === 3 ? "bg-orange-500 hover:bg-orange-400" : d.phase === 2 ? "bg-teal-600 hover:bg-teal-400" : "bg-emerald-600 hover:bg-emerald-400";
+          const lbl = d.phase === 3 ? " (drawdown)" : d.phase === 2 ? " (locked)" : "";
           return (
-            <div key={i} title={`Age ${d.age}: ${fmt(d.value)}${phaseLabel}`}
+            <div key={i} title={`Age ${d.age}: ${fmt(d.value)}${lbl}`}
               className={`flex-shrink-0 rounded-sm transition-colors cursor-pointer ${cls}`}
               style={{ width: BAR_W, height: h }} />
           );
@@ -616,14 +642,14 @@ function InvestmentJourneyChart({ data, fireAge, superAccessAge }: {
         <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-violet-600" /> Drawdown (combined)</span>
       </div>
 
-      <div className="relative min-w-max" style={{ height: CHART_H + 16 }}>
+      <div className="relative min-w-max pt-5" style={{ height: CHART_H + 36 }}>
         {fireMarkerLeft >= 0 && (
-          <div className="absolute bottom-5 top-0 w-px bg-emerald-400/70 pointer-events-none" style={{ left: fireMarkerLeft }}>
-            <span className="absolute -top-1 left-2 text-xs text-emerald-400 whitespace-nowrap font-semibold">FI/RE {fireAge}</span>
+          <div className="absolute bottom-5 top-5 w-px bg-emerald-400/70 pointer-events-none" style={{ left: fireMarkerLeft }}>
+            <span className="absolute top-0 left-2 text-xs text-emerald-400 whitespace-nowrap font-semibold">FI/RE {fireAge}</span>
           </div>
         )}
         {superMarkerLeft >= 0 && (
-          <div className="absolute bottom-5 top-0 w-px bg-teal-400/70 pointer-events-none" style={{ left: superMarkerLeft }}>
+          <div className="absolute bottom-5 top-5 w-px bg-teal-400/70 pointer-events-none" style={{ left: superMarkerLeft }}>
             <span className="absolute top-4 left-2 text-xs text-teal-400 whitespace-nowrap">Super {superAccessAge}</span>
           </div>
         )}
@@ -631,7 +657,6 @@ function InvestmentJourneyChart({ data, fireAge, superAccessAge }: {
         <div className="absolute bottom-5 left-0 flex items-end min-w-max" style={{ gap: BAR_GAP }}>
           {data.map((d, i) => {
             const totalH = Math.max(Math.round((d.balance / maxVal) * CHART_H), 2);
-
             if (d.phase === "grow") {
               const principalH = Math.round((d.principalPortion / d.balance) * totalH);
               const growthH = totalH - principalH;
@@ -639,15 +664,11 @@ function InvestmentJourneyChart({ data, fireAge, superAccessAge }: {
                 <div key={i} className="flex-shrink-0 flex flex-col cursor-pointer" style={{ width: BAR_W }}
                   title={`Age ${d.age}: ${fmt(d.balance)} (contributions: ${fmt(d.principalPortion)}, growth: ${fmt(d.balance - d.principalPortion)})`}>
                   {growthH > 0 && <div className="w-full bg-sky-400 hover:bg-sky-300 transition-colors rounded-t-sm" style={{ height: growthH }} />}
-                  {principalH > 0 && <div className="w-full bg-sky-700 hover:bg-sky-600 transition-colors rounded-b-sm" style={{ height: principalH }} />}
+                  {principalH > 0 && <div className="w-full bg-sky-700 hover:bg-sky-600 transition-colors" style={{ height: principalH }} />}
                 </div>
               );
             }
-
-            const cls = d.phase === "drawdown-invest"
-              ? "bg-sky-600 hover:bg-sky-400"
-              : "bg-violet-600 hover:bg-violet-400";
-
+            const cls = d.phase === "drawdown-invest" ? "bg-sky-600 hover:bg-sky-400" : "bg-violet-600 hover:bg-violet-400";
             return (
               <div key={i} title={`Age ${d.age}: ${fmt(d.balance)}`}
                 className={`flex-shrink-0 rounded-sm transition-colors cursor-pointer ${cls}`}
@@ -683,12 +704,12 @@ function FireProgressChart({ data, target, fireBarIdx }: {
 
   return (
     <div className="overflow-x-auto">
-      <div className="relative min-w-max" style={{ height: CHART_H + 20 }}>
+      <div className="relative min-w-max pt-5" style={{ height: CHART_H + 36 }}>
         <div className="absolute left-0 right-0 border-t border-dashed border-emerald-500/50 pointer-events-none"
           style={{ bottom: thresholdH + 20 }} />
         {markerLeft >= 0 && (
-          <div className="absolute bottom-5 top-0 w-px bg-emerald-400/80 pointer-events-none" style={{ left: markerLeft }}>
-            <span className="absolute -top-1 left-2 text-xs text-emerald-400 whitespace-nowrap font-semibold">
+          <div className="absolute bottom-5 top-5 w-px bg-emerald-400/80 pointer-events-none" style={{ left: markerLeft }}>
+            <span className="absolute top-0 left-2 text-xs text-emerald-400 whitespace-nowrap font-semibold">
               FI/RE age {data[fireBarIdx]?.age}
             </span>
           </div>
@@ -716,7 +737,7 @@ function FireProgressChart({ data, target, fireBarIdx }: {
   );
 }
 
-// ─── Drawdown chart (sky = phase 1 invest only, violet = phase 2 combined) ───
+// ─── Drawdown chart ───────────────────────────────────────────────────────────
 
 function DrawdownChart({ data, superUnlockAge }: {
   data: DrawdownPoint[];
@@ -736,20 +757,16 @@ function DrawdownChart({ data, superUnlockAge }: {
           <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-violet-600" /> Super + investments</span>
         </div>
       )}
-      <div className="relative min-w-max" style={{ height: CHART_H + (superUnlockAge ? 16 : 0) }}>
+      <div className="relative min-w-max pt-5" style={{ height: CHART_H + 36 }}>
         {unlockLeft >= 0 && (
-          <div className="absolute bottom-5 top-0 w-px bg-teal-400/70 pointer-events-none" style={{ left: unlockLeft }}>
-            <span className="absolute -top-1 left-2 text-xs text-teal-400 whitespace-nowrap">Super unlocks {superUnlockAge}</span>
+          <div className="absolute bottom-5 top-5 w-px bg-teal-400/70 pointer-events-none" style={{ left: unlockLeft }}>
+            <span className="absolute top-0 left-2 text-xs text-teal-400 whitespace-nowrap">Super unlocks {superUnlockAge}</span>
           </div>
         )}
         <div className="absolute bottom-5 left-0 flex items-end min-w-max" style={{ gap: BAR_GAP }}>
           {data.map((d, i) => {
             const h = Math.max(Math.round((d.value / maxVal) * CHART_H), 2);
-            const cls = d.depleted
-              ? "bg-red-700 hover:bg-red-500"
-              : d.phase === 1
-              ? "bg-sky-600 hover:bg-sky-400"
-              : "bg-violet-600 hover:bg-violet-400";
+            const cls = d.depleted ? "bg-red-700 hover:bg-red-500" : d.phase === 1 ? "bg-sky-600 hover:bg-sky-400" : "bg-violet-600 hover:bg-violet-400";
             return (
               <div key={i} title={`Age ${d.age}: ${fmt(d.value)}`}
                 className={`flex-shrink-0 rounded-sm transition-colors cursor-pointer ${cls}`}
@@ -769,18 +786,100 @@ function DrawdownChart({ data, superUnlockAge }: {
   );
 }
 
-// ─── Income & Expenses line chart — SVG, to age 100 ──────────────────────────
+// ─── Candle chart — body = remaining (invest/super split), wick = withdrawn ───
+
+function CandleChart({ data, superUnlockAge }: {
+  data: CandlePoint[];
+  superUnlockAge: number;
+}) {
+  if (!data.length) return <p className="text-gray-600 text-xs">No data</p>;
+  const maxVal = Math.max(...data.map((d) => d.remaining + d.withdrawn), 1);
+  const labelEvery = Math.max(1, Math.ceil(data.length / 12));
+  const superIdx = data.findIndex((d) => d.age >= superUnlockAge);
+  const superLeft = superIdx >= 0 ? superIdx * STEP + Math.floor(BAR_W / 2) : -1;
+
+  return (
+    <div className="overflow-x-auto">
+      <div className="flex flex-wrap gap-4 mb-2 text-xs text-gray-500">
+        <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-sky-600" /> Investments balance</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-orange-500" /> Super balance</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-0.5 h-3 rounded bg-rose-500" /> Annual withdrawal (wick)</span>
+      </div>
+
+      <div className="relative min-w-max pt-5" style={{ height: CHART_H + 36 }}>
+        {superLeft >= 0 && (
+          <div className="absolute bottom-5 top-5 w-px bg-teal-400/70 pointer-events-none" style={{ left: superLeft }}>
+            <span className="absolute top-0 left-2 text-xs text-teal-400 whitespace-nowrap">Super {superUnlockAge}</span>
+          </div>
+        )}
+
+        <div className="absolute bottom-5 left-0 flex items-end min-w-max" style={{ gap: BAR_GAP }}>
+          {data.map((d, i) => {
+            const total = d.remaining + d.withdrawn;
+            const totalH = Math.max(Math.round((total / maxVal) * CHART_H), 2);
+            const bodyH = d.depleted ? 0 : Math.max(Math.round((d.remaining / Math.max(total, 1)) * totalH), 1);
+            const wickH = Math.max(totalH - bodyH, 1);
+
+            const superFraction = d.remaining > 0 ? d.superPortion / d.remaining : 0;
+            const superH = Math.round(superFraction * bodyH);
+            const investH = bodyH - superH;
+
+            const wickColor = d.depleted ? "#b91c1c" : "#f43f5e";
+
+            return (
+              <div
+                key={i}
+                className="flex-shrink-0 flex flex-col items-center cursor-pointer"
+                style={{ width: BAR_W, height: totalH }}
+                title={`Age ${d.age} — Total: ${fmt(total)}, Withdrawn: ${fmt(d.withdrawn)}, Remaining: ${fmt(d.remaining)}${d.superPortion > 0 ? ` (invest ${fmt(d.investPortion)}, super ${fmt(d.superPortion)})` : ""}`}
+              >
+                {/* Wick — annual withdrawal (thin, above body) */}
+                <div className="flex-none rounded-t-sm" style={{ width: 2, height: wickH, background: wickColor }} />
+                {/* Body — remaining balance */}
+                {bodyH > 0 && (
+                  <div className="flex-none w-full flex flex-col" style={{ height: bodyH }}>
+                    {superH > 0 && (
+                      <div className="w-full bg-orange-500 hover:bg-orange-400 transition-colors" style={{ height: superH }} />
+                    )}
+                    {investH > 0 && (
+                      <div
+                        className={`w-full bg-sky-600 hover:bg-sky-400 transition-colors${superH === 0 ? " rounded-t-sm" : ""}`}
+                        style={{ height: investH }}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="absolute bottom-0 left-0 flex min-w-max" style={{ gap: BAR_GAP }}>
+          {data.map((d, i) => (
+            <div key={i} className="flex-shrink-0 text-center" style={{ width: BAR_W }}>
+              {i % labelEvery === 0 && <span className="text-xs text-gray-600">{d.age}</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Income & Expenses SVG line chart with hover tooltip ──────────────────────
 
 function IncExpLineChart({ data, fireAge, superAccessAge }: {
   data: IncomePoint[];
   fireAge: number | null;
   superAccessAge: number;
 }) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
   if (!data.length) return <p className="text-gray-600 text-xs">No data</p>;
 
   const W = 600;
-  const H = 180;
-  const MT = 24;
+  const H = 200;
+  const MT = 12;
   const MB = 20;
   const ML = 4;
   const MR = 4;
@@ -803,12 +902,26 @@ function IncExpLineChart({ data, fireAge, superAccessAge }: {
     data.map((d, i) => `${i === 0 ? "M" : "L"}${xPos(d.age).toFixed(1)} ${yPos(fn(d)).toFixed(1)}`).join(" ");
 
   const labelAges: number[] = [];
-  for (let a = Math.ceil(minAge / 10) * 10; a <= maxAge; a += 10) {
-    labelAges.push(a);
-  }
+  for (let a = Math.ceil(minAge / 10) * 10; a <= maxAge; a += 10) labelAges.push(a);
 
   const fireX = fireAge !== null ? xPos(fireAge) : null;
   const superX = xPos(superAccessAge);
+
+  const isHovering = hoverIdx !== null;
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const svgX = ((e.clientX - rect.left) / rect.width) * W;
+    const rawIdx = Math.round(((svgX - ML) / plotW) * (data.length - 1));
+    setHoverIdx(Math.max(0, Math.min(rawIdx, data.length - 1)));
+  };
+
+  const hd = hoverIdx !== null ? data[hoverIdx] : null;
+  const hcx = hd ? xPos(hd.age) : 0;
+  const tooltipW = 136;
+  const tooltipX = hcx + 8 + tooltipW > W - MR ? hcx - tooltipW - 8 : hcx + 8;
+
+  const opacity = isHovering ? "1" : "0.8";
 
   return (
     <div className="overflow-x-auto">
@@ -831,54 +944,78 @@ function IncExpLineChart({ data, fireAge, superAccessAge }: {
         </span>
       </div>
 
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ minWidth: 360 }} preserveAspectRatio="none">
-
-        {/* Subtle grid lines */}
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        style={{ minWidth: 360, cursor: isHovering ? "crosshair" : "default" }}
+        preserveAspectRatio="none"
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => setHoverIdx(null)}
+      >
+        {/* Grid */}
         {[0.25, 0.5, 0.75, 1].map((f) => (
-          <line key={f}
-            x1={ML} y1={MT + plotH * (1 - f)}
-            x2={ML + plotW} y2={MT + plotH * (1 - f)}
+          <line key={f} x1={ML} y1={MT + plotH * (1 - f)} x2={ML + plotW} y2={MT + plotH * (1 - f)}
             stroke="#1f2937" strokeWidth="1" />
         ))}
 
-        {/* FI/RE vertical marker */}
+        {/* FI/RE marker */}
         {fireX !== null && (
           <>
-            <line x1={fireX} y1={MT} x2={fireX} y2={MT + plotH}
-              stroke="#4ade80" strokeWidth="1" strokeOpacity="0.65" strokeDasharray="3 2" />
-            <text x={fireX + 3} y={MT + 9} fill="#4ade80" fontSize="7.5" fontWeight="bold">
-              FI/RE {fireAge}
+            <line x1={fireX} y1={MT} x2={fireX} y2={MT + plotH} stroke="#4ade80" strokeWidth="1" strokeOpacity="0.6" strokeDasharray="3 2" />
+            <text x={fireX + 3} y={MT + 9} fill="#4ade80" fontSize="7.5" fontWeight="bold">FI/RE {fireAge}</text>
+          </>
+        )}
+
+        {/* Super access marker */}
+        <line x1={superX} y1={MT} x2={superX} y2={MT + plotH} stroke="#2dd4bf" strokeWidth="1" strokeOpacity="0.6" strokeDasharray="3 2" />
+        <text x={superX + 3} y={MT + 19} fill="#2dd4bf" fontSize="7.5">Super {superAccessAge}</text>
+
+        {/* Lines */}
+        <path d={pathFor((d) => d.expenses)} fill="none" stroke="#ef4444" strokeWidth="1.5" strokeDasharray="5 3" strokeOpacity={opacity} />
+        <path d={pathFor((d) => d.investIncome)} fill="none" stroke="#0ea5e9" strokeWidth={isHovering ? "2" : "1.5"} strokeOpacity={opacity} />
+        <path d={pathFor((d) => d.superIncome)} fill="none" stroke="#14b8a6" strokeWidth={isHovering ? "2" : "1.5"} strokeOpacity={opacity} />
+        <path d={pathFor((d) => d.workingIncome)} fill="none" stroke="#10b981" strokeWidth={isHovering ? "2.5" : "2"} strokeOpacity={opacity} />
+
+        {/* Hover overlay */}
+        {hd !== null && (
+          <>
+            {/* Crosshair */}
+            <line x1={hcx} y1={MT} x2={hcx} y2={MT + plotH} stroke="#6b7280" strokeWidth="1" strokeOpacity="0.5" />
+
+            {/* Dots on each line */}
+            {hd.workingIncome > 0 && <circle cx={hcx} cy={yPos(hd.workingIncome)} r="3.5" fill="#10b981" stroke="#111827" strokeWidth="1" />}
+            {hd.investIncome > 0 && <circle cx={hcx} cy={yPos(hd.investIncome)} r="3.5" fill="#0ea5e9" stroke="#111827" strokeWidth="1" />}
+            {hd.superIncome > 0 && <circle cx={hcx} cy={yPos(hd.superIncome)} r="3.5" fill="#14b8a6" stroke="#111827" strokeWidth="1" />}
+            <circle cx={hcx} cy={yPos(hd.expenses)} r="3.5" fill="#ef4444" stroke="#111827" strokeWidth="1" />
+
+            {/* Tooltip box */}
+            <rect x={tooltipX} y={MT} width={tooltipW} height={92} rx="3" fill="#0f172a" stroke="#374151" strokeWidth="0.75" />
+            <text x={tooltipX + 7} y={MT + 12} fill="#9ca3af" fontSize="8" fontWeight="600">Age {hd.age}</text>
+            {hd.workingIncome > 0 && (
+              <text x={tooltipX + 7} y={MT + 26} fill="#10b981" fontSize="7.5">Work income: {fmtK(hd.workingIncome)}</text>
+            )}
+            {hd.investIncome > 0 && (
+              <text x={tooltipX + 7} y={MT + 38} fill="#0ea5e9" fontSize="7.5">Invest drawdown: {fmtK(hd.investIncome)}</text>
+            )}
+            {hd.superIncome > 0 && (
+              <text x={tooltipX + 7} y={MT + 50} fill="#14b8a6" fontSize="7.5">Super drawdown: {fmtK(hd.superIncome)}</text>
+            )}
+            <text x={tooltipX + 7} y={MT + 62} fill="#ef4444" fontSize="7.5">Expenses: {fmtK(hd.expenses)}</text>
+            <line x1={tooltipX + 7} y1={MT + 69} x2={tooltipX + tooltipW - 7} y2={MT + 69} stroke="#374151" strokeWidth="0.5" />
+            <text x={tooltipX + 7} y={MT + 80} fill={
+              (hd.workingIncome + hd.investIncome + hd.superIncome) >= hd.expenses ? "#34d399" : "#f59e0b"
+            } fontSize="7.5" fontWeight="600">
+              {(hd.workingIncome + hd.investIncome + hd.superIncome) >= hd.expenses
+                ? `Surplus: ${fmtK(hd.workingIncome + hd.investIncome + hd.superIncome - hd.expenses)}`
+                : `Gap: ${fmtK(hd.expenses - hd.workingIncome - hd.investIncome - hd.superIncome)}`
+              }
             </text>
           </>
         )}
 
-        {/* Super access vertical marker */}
-        <line x1={superX} y1={MT} x2={superX} y2={MT + plotH}
-          stroke="#2dd4bf" strokeWidth="1" strokeOpacity="0.65" strokeDasharray="3 2" />
-        <text x={superX + 3} y={MT + 19} fill="#2dd4bf" fontSize="7.5">
-          Super {superAccessAge}
-        </text>
-
-        {/* Expenses line — dashed red, drawn behind income lines */}
-        <path d={pathFor((d) => d.expenses)}
-          fill="none" stroke="#ef4444" strokeWidth="1.5" strokeDasharray="5 3" strokeOpacity="0.8" />
-
-        {/* Investment drawdown */}
-        <path d={pathFor((d) => d.investIncome)}
-          fill="none" stroke="#0ea5e9" strokeWidth="1.5" />
-
-        {/* Super drawdown */}
-        <path d={pathFor((d) => d.superIncome)}
-          fill="none" stroke="#14b8a6" strokeWidth="1.5" />
-
-        {/* Employment income — drawn on top */}
-        <path d={pathFor((d) => d.workingIncome)}
-          fill="none" stroke="#10b981" strokeWidth="2" />
-
         {/* Age axis labels */}
         {labelAges.map((a) => (
-          <text key={a} x={xPos(a)} y={H - 4}
-            fill="#4b5563" fontSize="8" textAnchor="middle">{a}</text>
+          <text key={a} x={xPos(a)} y={H - 4} fill="#4b5563" fontSize="8" textAnchor="middle">{a}</text>
         ))}
       </svg>
     </div>
