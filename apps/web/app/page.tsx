@@ -24,6 +24,7 @@ const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
 // ─── Chart constants ──────────────────────────────────────────────────────────
 
 const CHART_H = 160;
+const CGT_RATE = 0.25; // simplified effective CGT rate on investment drawdowns
 const BAR_W = 14;
 const BAR_GAP = 2;
 const STEP = BAR_W + BAR_GAP;
@@ -31,7 +32,7 @@ const STEP = BAR_W + BAR_GAP;
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type SuperPoint = { age: number; value: number; phase: 1 | 2 | 3 };
-type IncomePoint = { age: number; workingIncome: number; investIncome: number; superIncome: number; expenses: number };
+type IncomePoint = { age: number; workingIncome: number; investIncome: number; superIncome: number; expenses: number; investBalance: number; superBalance: number; cgtAmount: number };
 type InvestPhase = "grow" | "drawdown-invest" | "drawdown-combined";
 type InvestPoint = { age: number; balance: number; principalPortion: number; phase: InvestPhase };
 type DrawdownPoint = { age: number; value: number; depleted: boolean; phase: 1 | 2 };
@@ -158,12 +159,17 @@ export default function Home() {
   let expensesAtSuperAccess = annualExpenses;
   const candleRaw: CandleRaw[] = [];
 
+  // CGT gross-up: selling investments to net $X requires selling $X/(1-CGT_RATE) gross.
+  // Super drawdowns in retirement from a taxed fund are tax-free — no gross-up for super.
+  // blendedCgtFactor(iF) = superFrac*1 + investFrac/(1-CGT_RATE)
+
   if (retireBeforeSuper && effectiveFireAge !== null) {
     const yearsBeforeSuper = superAccessAge - effectiveFireAge;
 
+    // Phase 1: invest-only → gross up full withdrawal for CGT
     const phase1 = drawdownSchedule({
       portfolioBalance: investAtFire,
-      annualWithdrawal: annualExpenses,
+      annualWithdrawal: annualExpenses / (1 - CGT_RATE),
       annualGrowthRate: investRate,
       inflationRate: 0.025,
       currentAge: effectiveFireAge,
@@ -171,14 +177,19 @@ export default function Home() {
     });
 
     phase1FinalBalance = Math.max(phase1.finalBalance, 0);
-    expensesAtSuperAccess =
-      phase1.schedule[phase1.schedule.length - 1]?.inflationAdjustedWithdrawal ?? annualExpenses;
+    // Use inflation directly for living-expense amount (not the grossed-up withdrawal)
+    expensesAtSuperAccess = annualExpenses * Math.pow(1.025, yearsBeforeSuper);
 
     if (phase1.portfolioLasts !== null) drawdownLasts = phase1.portfolioLasts;
 
+    // Phase 2: combined pool — blended CGT factor weighted by invest/super proportions
+    const p2InvestFrac = (superAtAccess + phase1FinalBalance) > 0
+      ? phase1FinalBalance / (superAtAccess + phase1FinalBalance) : 0.5;
+    const p2CgtFactor = (1 - p2InvestFrac) + p2InvestFrac / (1 - CGT_RATE);
+
     const phase2 = drawdownSchedule({
       portfolioBalance: superAtAccess + phase1FinalBalance,
-      annualWithdrawal: expensesAtSuperAccess,
+      annualWithdrawal: expensesAtSuperAccess * p2CgtFactor,
       annualGrowthRate: blendedRate,
       inflationRate: 0.025,
       currentAge: superAccessAge,
@@ -198,9 +209,14 @@ export default function Home() {
     for (const s of phase2.schedule)
       candleRaw.push({ age: s.age, remaining: s.balance, withdrawn: s.withdrawal, depleted: s.depleted, phase: 2 });
   } else {
+    // Combined from retirement day — blended CGT factor
+    const p2InvestFrac = (superAtAccess + investAtFire) > 0
+      ? investAtFire / (superAtAccess + investAtFire) : 0.5;
+    const p2CgtFactor = (1 - p2InvestFrac) + p2InvestFrac / (1 - CGT_RATE);
+
     const combined = drawdownSchedule({
       portfolioBalance: superAtAccess + investAtFire,
-      annualWithdrawal: annualExpenses,
+      annualWithdrawal: annualExpenses * p2CgtFactor,
       annualGrowthRate: blendedRate,
       inflationRate: 0.025,
       currentAge: projectionEndAge,
@@ -228,9 +244,10 @@ export default function Home() {
 
   if (retireBeforeSuper && effectiveFireAge !== null) {
     const yearsBeforeSuper = superAccessAge - effectiveFireAge;
+    // Match main drawdown: gross up for CGT
     const phase1Draw = drawdownSchedule({
       portfolioBalance: investAtFire,
-      annualWithdrawal: annualExpenses,
+      annualWithdrawal: annualExpenses / (1 - CGT_RATE),
       annualGrowthRate: investRate,
       inflationRate: 0.025,
       currentAge: effectiveFireAge,
@@ -250,7 +267,9 @@ export default function Home() {
   let rollingInvestBal = investAtAccessAge;
   for (let y = 0; y < yearsPostSuper; y++) {
     const thisYearExpenses = expensesAtSuperAccess * Math.pow(1.025, y);
-    rollingInvestBal = Math.max(rollingInvestBal * (1 + investRate) - thisYearExpenses * investFrac, 0);
+    // Gross up: selling invest to net expenses*investFrac costs expenses*investFrac/(1-CGT)
+    const investGross = thisYearExpenses * investFrac / (1 - CGT_RATE);
+    rollingInvestBal = Math.max(rollingInvestBal * (1 + investRate) - investGross, 0);
     investJourney.push({ age: superAccessStartAge + y + 1, balance: rollingInvestBal, principalPortion: rollingInvestBal, phase: "drawdown-combined" });
   }
 
@@ -288,22 +307,48 @@ export default function Home() {
   });
   const investFireBarIdx = investNWSchedule.findIndex((s) => s.balance >= target);
 
+  // ── Balance lookup by age (for income chart tooltip) ─────────────────────────
+
+  const investBalByAge = new Map<number, number>();
+  const superBalByAge = new Map<number, number>();
+
+  // Accumulation phase balances
+  for (const s of investNWSchedule) investBalByAge.set(s.age, s.balance);
+  for (const s of superFullSchedule) superBalByAge.set(s.age, s.value);
+
+  // Retirement phase: drawdown data overrides invest balance; super already in superFullSchedule
+  for (const d of drawdownData) {
+    if (d.phase === 1) {
+      // Invest-only drawdown; super growing separately (already set from superFullSchedule)
+      investBalByAge.set(d.age, d.value);
+    } else {
+      // Combined pool — split proportionally
+      investBalByAge.set(d.age, Math.round(d.value * investFrac));
+      superBalByAge.set(d.age, Math.round(d.value * superFrac));
+    }
+  }
+
   // ── Income series to age 100 ───────────────────────────────────────────────────
 
   const fireAgeForIncome = effectiveFireAge ?? FALLBACK_HORIZON;
   const incExpFull: IncomePoint[] = Array.from({ length: 100 - age }, (_, i) => {
     const yr = age + i + 1;
     const inflExp = Math.round(annualExpenses * Math.pow(1.025, i));
+    const investBalance = investBalByAge.get(yr) ?? 0;
+    const superBalance = superBalByAge.get(yr) ?? 0;
+
     if (yr <= fireAgeForIncome)
-      return { age: yr, workingIncome: netIncome, investIncome: 0, superIncome: 0, expenses: inflExp };
-    if (retireBeforeSuper && yr < superAccessAge)
-      return { age: yr, workingIncome: 0, investIncome: inflExp, superIncome: 0, expenses: inflExp };
-    return {
-      age: yr, workingIncome: 0,
-      investIncome: Math.round(inflExp * (1 - superFrac)),
-      superIncome: Math.round(inflExp * superFrac),
-      expenses: inflExp,
-    };
+      return { age: yr, workingIncome: netIncome, investIncome: 0, superIncome: 0, expenses: inflExp, investBalance, superBalance, cgtAmount: 0 };
+
+    if (retireBeforeSuper && yr < superAccessAge) {
+      const cgtAmount = Math.round(inflExp * CGT_RATE / (1 - CGT_RATE));
+      return { age: yr, workingIncome: 0, investIncome: inflExp, superIncome: 0, expenses: inflExp, investBalance, superBalance, cgtAmount };
+    }
+
+    const investIncome = Math.round(inflExp * (1 - superFrac));
+    const superIncome = Math.round(inflExp * superFrac);
+    const cgtAmount = Math.round(investIncome * CGT_RATE / (1 - CGT_RATE));
+    return { age: yr, workingIncome: 0, investIncome, superIncome, expenses: inflExp, investBalance, superBalance, cgtAmount };
   });
 
   const retirementPortfolio = superAtAccess + investAtFire;
@@ -918,7 +963,7 @@ function IncExpLineChart({ data, fireAge, superAccessAge }: {
 
   const hd = hoverIdx !== null ? data[hoverIdx] : null;
   const hcx = hd ? xPos(hd.age) : 0;
-  const tooltipW = 136;
+  const tooltipW = 148;
   const tooltipX = hcx + 8 + tooltipW > W - MR ? hcx - tooltipW - 8 : hcx + 8;
 
   const opacity = isHovering ? "1" : "0.8";
@@ -988,28 +1033,56 @@ function IncExpLineChart({ data, fireAge, superAccessAge }: {
             {hd.superIncome > 0 && <circle cx={hcx} cy={yPos(hd.superIncome)} r="3.5" fill="#14b8a6" stroke="#111827" strokeWidth="1" />}
             <circle cx={hcx} cy={yPos(hd.expenses)} r="3.5" fill="#ef4444" stroke="#111827" strokeWidth="1" />
 
-            {/* Tooltip box */}
-            <rect x={tooltipX} y={MT} width={tooltipW} height={92} rx="3" fill="#0f172a" stroke="#374151" strokeWidth="0.75" />
-            <text x={tooltipX + 7} y={MT + 12} fill="#9ca3af" fontSize="8" fontWeight="600">Age {hd.age}</text>
-            {hd.workingIncome > 0 && (
-              <text x={tooltipX + 7} y={MT + 26} fill="#10b981" fontSize="7.5">Work income: {fmtK(hd.workingIncome)}</text>
-            )}
-            {hd.investIncome > 0 && (
-              <text x={tooltipX + 7} y={MT + 38} fill="#0ea5e9" fontSize="7.5">Invest drawdown: {fmtK(hd.investIncome)}</text>
-            )}
-            {hd.superIncome > 0 && (
-              <text x={tooltipX + 7} y={MT + 50} fill="#14b8a6" fontSize="7.5">Super drawdown: {fmtK(hd.superIncome)}</text>
-            )}
-            <text x={tooltipX + 7} y={MT + 62} fill="#ef4444" fontSize="7.5">Expenses: {fmtK(hd.expenses)}</text>
-            <line x1={tooltipX + 7} y1={MT + 69} x2={tooltipX + tooltipW - 7} y2={MT + 69} stroke="#374151" strokeWidth="0.5" />
-            <text x={tooltipX + 7} y={MT + 80} fill={
-              (hd.workingIncome + hd.investIncome + hd.superIncome) >= hd.expenses ? "#34d399" : "#f59e0b"
-            } fontSize="7.5" fontWeight="600">
-              {(hd.workingIncome + hd.investIncome + hd.superIncome) >= hd.expenses
-                ? `Surplus: ${fmtK(hd.workingIncome + hd.investIncome + hd.superIncome - hd.expenses)}`
-                : `Gap: ${fmtK(hd.expenses - hd.workingIncome - hd.investIncome - hd.superIncome)}`
-              }
-            </text>
+            {/* Tooltip box — dynamic height based on visible rows */}
+            {(() => {
+              const rows: { label: string; value: string; color: string }[] = [];
+              if (hd.workingIncome > 0) rows.push({ label: "Work income", value: fmtK(hd.workingIncome), color: "#10b981" });
+              if (hd.investIncome > 0) rows.push({ label: "Invest drawdown", value: fmtK(hd.investIncome), color: "#0ea5e9" });
+              if (hd.cgtAmount > 0) rows.push({ label: "  CGT (est.)", value: fmtK(hd.cgtAmount), color: "#f97316" });
+              if (hd.superIncome > 0) rows.push({ label: "Super drawdown", value: fmtK(hd.superIncome), color: "#14b8a6" });
+              rows.push({ label: "Expenses", value: fmtK(hd.expenses), color: "#ef4444" });
+
+              const totalIncome = hd.workingIncome + hd.investIncome + hd.superIncome;
+              const surplus = totalIncome - hd.expenses;
+
+              // Balance rows
+              const balRows: { label: string; value: string; color: string }[] = [];
+              if (hd.investBalance > 0) balRows.push({ label: "Invest balance", value: fmtK(hd.investBalance), color: "#7dd3fc" });
+              if (hd.superBalance > 0) balRows.push({ label: "Super balance", value: fmtK(hd.superBalance), color: "#6ee7b7" });
+
+              const lineH = 12;
+              const headerH = 18;
+              const divH = 7;
+              const padV = 8;
+              const totalH = padV + headerH + rows.length * lineH + divH + 1 * lineH + divH + balRows.length * lineH + padV;
+
+              let cy = MT + padV;
+              return (
+                <>
+                  <rect x={tooltipX} y={MT} width={tooltipW} height={totalH} rx="3" fill="#0f172a" stroke="#374151" strokeWidth="0.75" />
+                  <text x={tooltipX + 7} y={cy + 10} fill="#9ca3af" fontSize="8" fontWeight="700">Age {hd.age}</text>
+                  {(() => { cy += headerH; return null; })()}
+                  {rows.map((r, ri) => {
+                    const y = cy + ri * lineH + 9;
+                    return <text key={ri} x={tooltipX + 7} y={y} fill={r.color} fontSize="7.5">{r.label}: {r.value}</text>;
+                  })}
+                  {(() => { cy += rows.length * lineH + divH; return null; })()}
+                  <line x1={tooltipX + 7} y1={cy} x2={tooltipX + tooltipW - 7} y2={cy} stroke="#374151" strokeWidth="0.5" />
+                  {(() => { cy += 1; return null; })()}
+                  <text x={tooltipX + 7} y={cy + 9} fill={surplus >= 0 ? "#34d399" : "#f59e0b"} fontSize="7.5" fontWeight="600">
+                    {surplus >= 0 ? `Surplus: ${fmtK(surplus)}` : `Gap: ${fmtK(-surplus)}`}
+                  </text>
+                  {(() => { cy += lineH + divH; return null; })()}
+                  {balRows.length > 0 && (
+                    <line x1={tooltipX + 7} y1={cy} x2={tooltipX + tooltipW - 7} y2={cy} stroke="#374151" strokeWidth="0.5" />
+                  )}
+                  {(() => { cy += 1; return null; })()}
+                  {balRows.map((r, ri) => (
+                    <text key={ri} x={tooltipX + 7} y={cy + ri * lineH + 9} fill={r.color} fontSize="7.5">{r.label}: {r.value}</text>
+                  ))}
+                </>
+              );
+            })()}
           </>
         )}
 
